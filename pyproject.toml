@@ -1,0 +1,96 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyturboquant"
+version = "0.0.1"
+authors = [
+    { name = "Jörg Bahlmann", email = "jorg.bahlmann@gmail.com" },
+]
+description = "High-performance implementation of Google's TurboQuant: online vector quantization with near-optimal distortion rates"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.12"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+dependencies = [
+    "torch>=2.4",
+]
+
+[project.optional-dependencies]
+langchain = ["langchain-core>=0.3", "langchain-huggingface"]
+dev = [
+    "pytest>=8.0",
+    "pytest-benchmark",
+    "hypothesis",
+    "ruff>=0.6",
+    "mypy>=1.11",
+    "pre-commit",
+    "scipy>=1.14",
+]
+all = [
+    "pyturboquant[langchain]",
+    "pyturboquant[dev]",
+]
+
+[project.urls]
+Homepage = "https://github.com/jorgbahlmann/pyturboquant"
+Issues = "https://github.com/jorgbahlmann/pyturboquant/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+pyturboquant = ["../data/codebooks/*.pt"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "TC",   # flake8-type-checking
+    "RUF",  # ruff-specific
+]
+ignore = [
+    "E501",
+    "TC001",  # runtime imports needed for PyTorch library
+    "TC002",  # runtime imports needed for PyTorch library
+    "TC003",  # runtime imports needed for stdlib types used at runtime
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["pyturboquant"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+check_untyped_defs = true
+packages = ["pyturboquant"]
+mypy_path = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "gpu: marks tests that require a CUDA GPU",
+]
