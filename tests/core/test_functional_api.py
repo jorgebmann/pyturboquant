@@ -43,3 +43,22 @@ class TestFunctionalAPI:
         true_ip = (x * y).sum(dim=-1)
         # Estimates should be in the right ballpark
         assert ((est - true_ip).abs() < true_ip.abs() * 2.0 + 5.0).all()
+
+    def test_functional_cache_separates_devices(self) -> None:
+        """Quantizer cache keys must include device (CPU vs CUDA)."""
+        from pyturboquant.core import _IP_CACHE, _MSE_CACHE, ip_quantize, mse_quantize
+
+        _MSE_CACHE.clear()
+        _IP_CACHE.clear()
+        g = torch.Generator().manual_seed(0)
+        x_cpu = torch.randn(4, 16, generator=g)
+        mse_quantize(x_cpu, bits=3, seed=0)
+        assert len(_MSE_CACHE) == 1
+        if torch.cuda.is_available():
+            x_cuda = x_cpu.cuda()
+            mse_quantize(x_cuda, bits=3, seed=0)
+            assert len(_MSE_CACHE) == 2
+            _IP_CACHE.clear()
+            ip_quantize(x_cpu, bits=3, seed=0)
+            ip_quantize(x_cuda, bits=3, seed=0)
+            assert len(_IP_CACHE) == 2

@@ -91,6 +91,25 @@ class TestTurboQuantVectorStore:
         results = store.similarity_search_by_vector(query_vec, k=3)
         assert len(results) == 3
 
+    def test_similarity_search_by_vector_batch(self) -> None:
+        from pyturboquant.search.langchain import TurboQuantVectorStore
+
+        emb = MockEmbeddings(dim=32)
+        store = TurboQuantVectorStore(embedding=emb, bits=3, metric="ip")
+        store.add_texts([f"Doc {i}" for i in range(8)])
+        q1 = torch.tensor(emb.embed_query("Doc 0"), dtype=torch.float32)
+        q2 = torch.tensor(emb.embed_query("Doc 7"), dtype=torch.float32)
+        batch = torch.stack([q1, q2], dim=0)
+        scored = store.similarity_search_by_vector_with_score(batch, k=3)
+        assert isinstance(scored, list)
+        assert len(scored) == 2
+        assert all(len(row) <= 3 for row in scored)
+        assert all(isinstance(doc, Document) for row in scored for doc, _ in row)
+
+        docs = store.similarity_search_by_vector(batch, k=2)
+        assert len(docs) == 2
+        assert all(len(row) <= 2 for row in docs)
+
     def test_add_texts_with_metadata(self) -> None:
         store = self._make_store()
         texts = ["Alpha", "Beta", "Gamma"]

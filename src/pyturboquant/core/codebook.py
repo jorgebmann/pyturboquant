@@ -2,11 +2,17 @@
 
 The codebooks are precomputed for a standard Gaussian N(0,1) and scaled
 by 1/sqrt(d) at load time to match the sphere coordinate distribution.
+
+Shipped ``data/codebooks/*.pt`` files cover common bit-widths so runtime
+never needs SciPy. SciPy is only used when those files are missing and
+``bits > 4`` (iterative Lloyd--Max) or when computing ``mse_cost`` without
+cached values.
 """
 
 from __future__ import annotations
 
 import math
+from collections import OrderedDict
 from pathlib import Path
 
 import torch
@@ -14,6 +20,8 @@ import torch
 from pyturboquant.core.types import Codebook
 
 _CODEBOOK_CACHE: dict[int, Codebook] = {}
+_SCALED_CODEBOOK_CACHE: OrderedDict[tuple[int, int, str], Codebook] = OrderedDict()
+_MAX_SCALED_CODEBOOK_CACHE = 256
 
 _DATA_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data" / "codebooks"
 
@@ -143,13 +151,21 @@ def get_codebook(dim: int, bits: int, device: torch.device | None = None) -> Cod
         else:
             _CODEBOOK_CACHE[bits] = _compute_gaussian_codebook(bits)
 
+    dev = device or torch.device("cpu")
+    scaled_key = (bits, dim, str(dev))
+    if scaled_key in _SCALED_CODEBOOK_CACHE:
+        _SCALED_CODEBOOK_CACHE.move_to_end(scaled_key)
+        return _SCALED_CODEBOOK_CACHE[scaled_key]
+
     base = _CODEBOOK_CACHE[bits]
     scale = 1.0 / math.sqrt(dim)
-    dev = device or torch.device("cpu")
-
-    return Codebook(
+    scaled = Codebook(
         centroids=(base.centroids * scale).to(dev),
         boundaries=(base.boundaries * scale).to(dev),
         bits=bits,
         mse_cost=base.mse_cost / dim,
     )
+    _SCALED_CODEBOOK_CACHE[scaled_key] = scaled
+    while len(_SCALED_CODEBOOK_CACHE) > _MAX_SCALED_CODEBOOK_CACHE:
+        _SCALED_CODEBOOK_CACHE.popitem(last=False)
+    return scaled

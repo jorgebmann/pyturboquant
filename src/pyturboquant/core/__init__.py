@@ -30,19 +30,19 @@ __all__ = [
     "random_rotate_inverse",
 ]
 
-_MSE_CACHE: dict[tuple[int, int, int], MSEQuantizer] = {}
-_IP_CACHE: dict[tuple[int, int, int], InnerProductQuantizer] = {}
+_MSE_CACHE: dict[tuple[int, int, int, str], MSEQuantizer] = {}
+_IP_CACHE: dict[tuple[int, int, int, str], InnerProductQuantizer] = {}
 
 
 def _get_mse(dim: int, bits: int, seed: int, device: torch.device) -> MSEQuantizer:
-    key = (dim, bits, seed)
+    key = (dim, bits, seed, str(device))
     if key not in _MSE_CACHE:
         _MSE_CACHE[key] = MSEQuantizer(dim, bits, seed, device)
     return _MSE_CACHE[key]
 
 
 def _get_ip(dim: int, bits: int, seed: int, device: torch.device) -> InnerProductQuantizer:
-    key = (dim, bits, seed)
+    key = (dim, bits, seed, str(device))
     if key not in _IP_CACHE:
         _IP_CACHE[key] = InnerProductQuantizer(dim, bits, seed, device)
     return _IP_CACHE[key]

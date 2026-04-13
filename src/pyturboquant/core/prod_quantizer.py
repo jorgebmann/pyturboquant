@@ -21,6 +21,12 @@ class InnerProductQuantizer:
 
     The total budget is `bits` bits per coordinate: (bits-1) for MSE + 1 for QJL.
 
+    Each ``quantize`` performs one random rotation and Lloyd--Max assignment for
+    the MSE stage, reconstructs ``x_hat`` from centroids (no pack/unpack round
+    trip for the residual), then runs QJL on the normalized residual. Cost is
+    dominated by rotation and QJL matrix multiplies; batch large ``add`` calls
+    when indexing many vectors.
+
     Args:
         dim: Vector dimension d.
         bits: Total bit budget per coordinate (>= 2).
@@ -64,8 +70,7 @@ class InnerProductQuantizer:
         leading = x.shape[:-1]
         flat = x.reshape(-1, self.dim)
 
-        mse_qt = self._mse.quantize(flat)
-        x_hat = self._mse.dequantize(mse_qt)
+        mse_qt, x_hat = self._mse.quantize_with_reconstruction(flat)
 
         residual = flat - x_hat
         residual_norms = torch.linalg.norm(residual, dim=-1)

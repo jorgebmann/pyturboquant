@@ -156,35 +156,41 @@ class TurboQuantVectorStore(VectorStore):
 
     def similarity_search_by_vector(
         self, embedding: torch.Tensor | list[float], k: int = 4, **kwargs: Any
-    ) -> list[Document]:
+    ) -> list[Document] | list[list[Document]]:
         """Search by pre-computed embedding vector.
 
         Args:
-            embedding: Query embedding as tensor or list.
+            embedding: Query embedding as tensor or list (``(d,)``, ``(1, d)``, or ``(nq, d)``).
             k: Number of results.
             **kwargs: Additional keyword arguments (ignored).
 
         Returns:
-            List of Documents ranked by similarity.
+            Documents ranked by similarity; nested list when ``nq > 1``.
         """
         results = self.similarity_search_by_vector_with_score(embedding, k=k)
-        return [doc for doc, _ in results]
+        if not results:
+            return []
+        if isinstance(results[0], tuple):
+            return [doc for doc, _ in results]
+        return [[doc for doc, _ in row] for row in results]
 
     def similarity_search_by_vector_with_score(
         self,
         embedding: torch.Tensor | list[float],
         k: int = 4,
         **kwargs: Any,
-    ) -> list[tuple[Document, float]]:
+    ) -> list[tuple[Document, float]] | list[list[tuple[Document, float]]]:
         """Search by vector with scores.
 
         Args:
-            embedding: Query embedding.
+            embedding: Query embedding of shape ``(d,)``, ``(1, d)``, or ``(nq, d)``.
             k: Number of results.
             **kwargs: Additional keyword arguments (ignored).
 
         Returns:
-            List of (Document, score) tuples.
+            For ``(d,)`` or ``(1, d)``, a flat list of up to ``k`` ``(Document, score)``
+            pairs. For ``(nq, d)`` with ``nq > 1``, a list of length ``nq``, each
+            entry a list of up to ``k`` pairs for that query row.
         """
         if self._index is None or self._index.ntotal == 0:
             return []
@@ -194,13 +200,27 @@ class TurboQuantVectorStore(VectorStore):
         embedding = embedding.to(self._device)
 
         distances, indices = self._index.search(embedding, k=k)
-        results = []
-        for i in range(len(indices)):
-            doc_idx = indices[i].item()
-            score = distances[i].item()
-            if 0 <= doc_idx < len(self._documents):
-                results.append((self._documents[doc_idx], score))
-        return results
+        if indices.dim() == 1:
+            row_results: list[tuple[Document, float]] = []
+            for rank in range(indices.shape[0]):
+                doc_idx = int(indices[rank].item())
+                score = float(distances[rank].item())
+                if 0 <= doc_idx < len(self._documents):
+                    row_results.append((self._documents[doc_idx], score))
+            return row_results
+
+        batch_out: list[list[tuple[Document, float]]] = []
+        for qi in range(indices.shape[0]):
+            row: list[tuple[Document, float]] = []
+            for rank in range(indices.shape[1]):
+                doc_idx = int(indices[qi, rank].item())
+                score = float(distances[qi, rank].item())
+                if 0 <= doc_idx < len(self._documents):
+                    row.append((self._documents[doc_idx], score))
+            batch_out.append(row)
+        if indices.shape[0] == 1:
+            return batch_out[0]
+        return batch_out
 
     @classmethod
     def from_texts(
@@ -281,6 +301,10 @@ class TurboQuantVectorStore(VectorStore):
 
         Returns:
             Loaded TurboQuantVectorStore.
+
+        Note:
+            Metadata is loaded with ``weights_only=False`` because it contains
+            nested Python structures (documents, ids). Only load from trusted paths.
         """
         path = Path(path)
         meta = torch.load(path / "metadata.pt", weights_only=False)

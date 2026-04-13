@@ -35,6 +35,23 @@ class TestTurboQuantIndex:
         idx.add(db[50:])
         assert idx.ntotal == 100
 
+    def test_consolidate_merges_chunks(self) -> None:
+        idx = TurboQuantIndex(dim=64, bits=3, metric="ip", seed=0)
+        db, queries = self._make_data(n=30)
+        idx.add(db[:10])
+        idx.add(db[10:20])
+        idx.add(db[20:])
+        assert len(idx._qt_data) == 3
+        idx.consolidate()
+        assert len(idx._qt_data) == 1
+        assert idx.ntotal == 30
+        d1, i1 = idx.search(queries, k=5)
+        idx2 = TurboQuantIndex(dim=64, bits=3, metric="ip", seed=0)
+        idx2.add(db)
+        d2, i2 = idx2.search(queries, k=5)
+        torch.testing.assert_close(i1, i2)
+        torch.testing.assert_close(d1, d2, atol=1e-4, rtol=1e-4)
+
     def test_search_shape(self) -> None:
         idx = TurboQuantIndex(dim=64, bits=3, metric="ip")
         db, queries = self._make_data()
