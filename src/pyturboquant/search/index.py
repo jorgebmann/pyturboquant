@@ -58,6 +58,14 @@ class TurboQuantIndex:
         return self._ntotal
 
     @property
+    def nchunks(self) -> int:
+        """Number of internal chunks produced by repeated ``add`` calls.
+
+        Useful for deciding when to call :meth:`consolidate`.
+        """
+        return len(self._qt_data)
+
+    @property
     def last_add_time_ms(self) -> float:
         """Wall-clock time of the last add() call in milliseconds."""
         return self._last_add_time_ms
