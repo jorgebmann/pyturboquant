@@ -10,7 +10,7 @@ import math
 
 import torch
 
-from pyturboquant.core.packed import pack_bits, unpack_bits
+from pyturboquant.core.packed import pack_bits_batch, unpack_bits_batch
 
 
 class QJLTransform:
@@ -63,7 +63,7 @@ class QJLTransform:
         flat = r.reshape(-1, self.dim)  # (n, d)
         proj = flat @ self._S.T  # (n, m)
         signs = (proj >= 0).to(torch.uint8)
-        packed = torch.stack([pack_bits(signs[i]) for i in range(flat.shape[0])])
+        packed = pack_bits_batch(signs)
         return packed.reshape(*leading, -1)
 
     def estimate_inner_product(
@@ -94,15 +94,10 @@ class QJLTransform:
         n = flat_z.shape[0]
 
         Sy = flat_y @ self._S.T  # (n, m)
+        signs = unpack_bits_batch(flat_z, self.m)
         scale = math.sqrt(math.pi / 2.0) / self.m
-
-        results = []
-        for i in range(n):
-            z = unpack_bits(flat_z[i], self.m)  # (m,) in {-1, +1}
-            ip = (z * Sy[i]).sum()
-            results.append(scale * flat_norms[i] * ip)
-
-        return torch.stack(results).reshape(leading)
+        ip = (signs * Sy).sum(dim=-1)
+        return (scale * flat_norms * ip).reshape(leading)
 
     def estimate_inner_product_batch(
         self,
@@ -121,7 +116,24 @@ class QJLTransform:
             Estimated inner products, shape (n,).
         """
         n = packed_z.shape[0]
-        signs = torch.stack([unpack_bits(packed_z[i], self.m) for i in range(n)])  # (n, m)
+        signs = unpack_bits_batch(packed_z, self.m)
         Sy = y @ self._S.T  # (m,)
         scale = math.sqrt(math.pi / 2.0) / self.m
         return scale * residual_norms * (signs * Sy.unsqueeze(0)).sum(dim=-1)
+
+    def estimate_inner_product_batch_queries(
+        self,
+        packed_z: torch.Tensor,
+        queries: torch.Tensor,
+        residual_norms: torch.Tensor,
+    ) -> torch.Tensor:
+        """All-queries variant: ``queries`` of shape (nq, d), database rows ``n``.
+
+        Returns:
+            Tensor of shape (nq, n) with ``[j, i]`` = estimate for DB row i vs query j.
+        """
+        signs = unpack_bits_batch(packed_z, self.m)  # (n, m)
+        Sy = queries @ self._S.T  # (nq, m)
+        scale = math.sqrt(math.pi / 2.0) / self.m
+        ip = signs @ Sy.T  # (n, nq)
+        return scale * residual_norms.unsqueeze(0) * ip.T

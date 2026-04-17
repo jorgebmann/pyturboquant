@@ -6,7 +6,32 @@ a Gaussian random matrix, ensuring uniform distribution over O(d).
 
 from __future__ import annotations
 
+from collections import OrderedDict
+
 import torch
+
+_MAX_ROTATION_CACHE = 64
+_ROTATION_CACHE: OrderedDict[tuple[int, int, str, str], RandomRotation] = OrderedDict()
+
+
+def _rotation_cache_key(
+    dim: int, seed: int, device: torch.device, dtype: torch.dtype
+) -> tuple[int, int, str, str]:
+    return (dim, seed, str(device), str(dtype))
+
+
+def _get_cached_rotation(
+    dim: int, seed: int, device: torch.device, dtype: torch.dtype
+) -> RandomRotation:
+    key = _rotation_cache_key(dim, seed, device, dtype)
+    if key in _ROTATION_CACHE:
+        _ROTATION_CACHE.move_to_end(key)
+        return _ROTATION_CACHE[key]
+    rot = RandomRotation(dim, seed=seed, device=device, dtype=dtype)
+    _ROTATION_CACHE[key] = rot
+    while len(_ROTATION_CACHE) > _MAX_ROTATION_CACHE:
+        _ROTATION_CACHE.popitem(last=False)
+    return rot
 
 
 class RandomRotation:
@@ -85,7 +110,9 @@ def random_rotate(x: torch.Tensor, seed: int = 0) -> torch.Tensor:
     Returns:
         Rotated tensor of shape (*, d).
     """
-    rot = RandomRotation(dim=x.shape[-1], seed=seed, device=x.device, dtype=x.dtype)
+    rot = _get_cached_rotation(
+        dim=x.shape[-1], seed=seed, device=x.device, dtype=x.dtype
+    )
     return rot.forward(x)
 
 
@@ -99,5 +126,7 @@ def random_rotate_inverse(y: torch.Tensor, seed: int = 0) -> torch.Tensor:
     Returns:
         Original tensor of shape (*, d).
     """
-    rot = RandomRotation(dim=y.shape[-1], seed=seed, device=y.device, dtype=y.dtype)
+    rot = _get_cached_rotation(
+        dim=y.shape[-1], seed=seed, device=y.device, dtype=y.dtype
+    )
     return rot.inverse(y)

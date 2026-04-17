@@ -12,7 +12,7 @@ from pathlib import Path
 import torch
 
 from pyturboquant.core.prod_quantizer import InnerProductQuantizer
-from pyturboquant.core.types import QuantizedIP
+from pyturboquant.core.types import QuantizedIP, QuantizedMSE
 
 
 class TurboQuantIndex:
@@ -58,6 +58,14 @@ class TurboQuantIndex:
         return self._ntotal
 
     @property
+    def nchunks(self) -> int:
+        """Number of internal chunks produced by repeated ``add`` calls.
+
+        Useful for deciding when to call :meth:`consolidate`.
+        """
+        return len(self._qt_data)
+
+    @property
     def last_add_time_ms(self) -> float:
         """Wall-clock time of the last add() call in milliseconds."""
         return self._last_add_time_ms
@@ -67,10 +75,13 @@ class TurboQuantIndex:
         """Approximate memory usage of the quantized index in MB."""
         total_bytes = 0
         for qt in self._qt_data:
-            total_bytes += qt.mse_data.packed_indices.numel()
-            total_bytes += qt.mse_data.norms.numel() * 4
-            total_bytes += qt.qjl_bits.numel()
-            total_bytes += qt.residual_norms.numel() * 4
+            for t in (
+                qt.mse_data.packed_indices,
+                qt.mse_data.norms,
+                qt.qjl_bits,
+                qt.residual_norms,
+            ):
+                total_bytes += t.numel() * t.element_size()
         return total_bytes / (1024 * 1024)
 
     def add(self, vectors: torch.Tensor) -> None:
@@ -90,6 +101,47 @@ class TurboQuantIndex:
         self._norms_sq.append(norms_sq)
         self._ntotal += vectors.shape[0]
         self._last_add_time_ms = (time.perf_counter() - t0) * 1000.0
+
+    def consolidate(self) -> None:
+        """Merge all index chunks from repeated ``add`` into a single chunk.
+
+        Reduces Python-loop overhead during ``search`` when many small batches
+        were added. No-op if there is at most one chunk.
+        """
+        if len(self._qt_data) <= 1:
+            return
+
+        first = self._qt_data[0]
+        mse_packed = torch.cat([q.mse_data.packed_indices for q in self._qt_data], dim=0)
+        mse_norms = torch.cat(
+            [q.mse_data.norms.reshape(-1, 1) for q in self._qt_data], dim=0
+        )
+        qjl_bits = torch.cat(
+            [q.qjl_bits.reshape(q.qjl_bits.shape[0], -1) for q in self._qt_data], dim=0
+        )
+        residual_norms = torch.cat(
+            [q.residual_norms.reshape(-1) for q in self._qt_data], dim=0
+        )
+
+        mse_merged = QuantizedMSE(
+            packed_indices=mse_packed,
+            norms=mse_norms,
+            dim=first.mse_data.dim,
+            bits=first.mse_data.bits,
+            seed=first.mse_data.seed,
+            device=self.device,
+        )
+        merged = QuantizedIP(
+            mse_data=mse_merged,
+            qjl_bits=qjl_bits,
+            residual_norms=residual_norms,
+            dim=first.dim,
+            bits=first.bits,
+            seed=first.seed,
+            device=self.device,
+        )
+        self._qt_data = [merged]
+        self._norms_sq = [torch.cat(self._norms_sq, dim=0)]
 
     def search(
         self, queries: torch.Tensor, k: int = 10
@@ -114,52 +166,41 @@ class TurboQuantIndex:
         queries = queries.to(self.device)
 
         k = min(k, self._ntotal)
-        all_distances = []
-        all_indices = []
+        scores = self._compute_scores_batch(queries)
 
-        for qi in range(queries.shape[0]):
-            q = queries[qi]
-            scores = self._compute_scores(q)
-            if self.metric == "ip":
-                topk_vals, topk_idx = torch.topk(scores, k, largest=True)
-            else:
-                topk_vals, topk_idx = torch.topk(scores, k, largest=False)
-            all_distances.append(topk_vals)
-            all_indices.append(topk_idx)
-
-        distances = torch.stack(all_distances)
-        indices = torch.stack(all_indices)
+        if self.metric == "ip":
+            topk_vals, topk_idx = torch.topk(scores, k, dim=-1, largest=True)
+        else:
+            topk_vals, topk_idx = torch.topk(scores, k, dim=-1, largest=False)
 
         if single:
-            distances = distances.squeeze(0)
-            indices = indices.squeeze(0)
+            topk_vals = topk_vals.squeeze(0)
+            topk_idx = topk_idx.squeeze(0)
 
-        return distances, indices
+        return topk_vals, topk_idx
 
-    def _compute_scores(self, query: torch.Tensor) -> torch.Tensor:
-        """Compute scores for a single query against all database vectors."""
-        all_scores = []
+    def _compute_scores_batch(self, queries: torch.Tensor) -> torch.Tensor:
+        """Scores for each query vs all DB vectors. Shape (nq, n_total)."""
+        nq = queries.shape[0]
+        q_norm_sq = (queries * queries).sum(dim=-1, keepdim=True)  # (nq, 1)
+        cols: list[torch.Tensor] = []
         for i, qt in enumerate(self._qt_data):
             x_hat = self._quantizer.dequantize(qt)
             flat_x_hat = x_hat.reshape(-1, self.dim)
 
-            mse_ip = (flat_x_hat * query.unsqueeze(0)).sum(dim=-1)
-
-            qjl_ip = self._quantizer.qjl_transform.estimate_inner_product_batch(
+            mse_ip = flat_x_hat @ queries.T  # (chunk, nq)
+            qjl_ip = self._quantizer.qjl_transform.estimate_inner_product_batch_queries(
                 qt.qjl_bits.reshape(-1, qt.qjl_bits.shape[-1]),
-                query,
+                queries,
                 qt.residual_norms.reshape(-1),
             )
-
+            chunk_ip = mse_ip.T + qjl_ip  # (nq, chunk)
             if self.metric == "ip":
-                all_scores.append(mse_ip + qjl_ip)
+                cols.append(chunk_ip)
             else:
-                q_norm_sq = (query * query).sum()
-                ip = mse_ip + qjl_ip
-                l2 = self._norms_sq[i] - 2.0 * ip + q_norm_sq
-                all_scores.append(l2)
-
-        return torch.cat(all_scores)
+                ns = self._norms_sq[i].unsqueeze(0)
+                cols.append(ns - 2.0 * chunk_ip + q_norm_sq)
+        return torch.cat(cols, dim=-1)
 
     def save(self, path: str | Path) -> None:
         """Save index state to disk.
@@ -203,8 +244,6 @@ class TurboQuantIndex:
         Returns:
             Loaded TurboQuantIndex.
         """
-        from pyturboquant.core.types import QuantizedMSE
-
         state = torch.load(Path(path), weights_only=True, map_location=device)
         dev = torch.device(device) if isinstance(device, str) else device
 

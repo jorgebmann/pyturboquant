@@ -82,6 +82,45 @@ class MSEQuantizer:
             device=self.device,
         )
 
+    def quantize_with_reconstruction(
+        self, x: torch.Tensor
+    ) -> tuple[QuantizedMSE, torch.Tensor]:
+        """Same as ``quantize``, but also returns the MSE reconstruction without pack/unpack.
+
+        Avoids an extra dequantize pass when the caller needs ``x_hat`` immediately
+        (for example inner-product quantization of the residual).
+        """
+        leading = x.shape[:-1]
+        d = x.shape[-1]
+        if d != self.dim:
+            raise ValueError(f"Expected dim={self.dim}, got {d}")
+
+        flat = x.reshape(-1, d)
+        norms = torch.linalg.norm(flat, dim=-1, keepdim=True)
+        safe_norms = norms.clamp(min=1e-12)
+        normalized = flat / safe_norms
+
+        rotated = self._rotation.forward(normalized)
+
+        boundaries = self._codebook.boundaries
+        indices = torch.searchsorted(boundaries, rotated)
+        indices = indices.clamp(0, (1 << self.bits) - 1).to(torch.int32)
+
+        centroids = self._codebook.centroids[indices]
+        rotated_back = self._rotation.inverse(centroids)
+        x_hat = (rotated_back * safe_norms).reshape(*leading, d)
+
+        packed = pack_indices(indices.reshape(-1), self.bits)
+        qt = QuantizedMSE(
+            packed_indices=packed,
+            norms=norms.reshape(*leading, 1),
+            dim=self.dim,
+            bits=self.bits,
+            seed=self.seed,
+            device=self.device,
+        )
+        return qt, x_hat
+
     def dequantize(self, qt: QuantizedMSE) -> torch.Tensor:
         """Reconstruct vectors from quantized representation.
 

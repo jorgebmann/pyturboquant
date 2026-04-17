@@ -51,27 +51,25 @@ def asymmetric_l2(
     query: torch.Tensor,
     qt_list: list[QuantizedIP],
     mse_quantizer: MSEQuantizer,
+    qjl_transform: QJLTransform,
     norms_sq: torch.Tensor,
 ) -> torch.Tensor:
-    """Compute asymmetric L2 distances using the identity:
+    """Compute asymmetric squared L2 distances using the identity:
     ||x - q||^2 = ||x||^2 - 2<x, q> + ||q||^2
 
-    For ranking, only the IP term matters (norms are constant per db vector).
+    Uses the same asymmetric inner-product estimate (MSE + QJL) as
+    :class:`TurboQuantIndex` with ``metric="l2"``.
 
     Args:
         query: Query vector of shape (d,).
         qt_list: List of QuantizedIP entries.
         mse_quantizer: MSEQuantizer for the database.
+        qjl_transform: QJL transform used when building ``qt_list``.
         norms_sq: Precomputed ||x_i||^2 for each database vector, shape (n,).
 
     Returns:
-        Approximate L2 distances, shape (n,).
+        Approximate squared L2 distances, shape (n,).
     """
-    ip_scores = []
-    for qt in qt_list:
-        x_hat = mse_quantizer.dequantize(qt.mse_data)
-        flat_x_hat = x_hat.reshape(-1, query.shape[-1])
-        ip_scores.append((flat_x_hat * query.unsqueeze(0)).sum(dim=-1))
-    ip = torch.cat(ip_scores)
+    ip = asymmetric_inner_product(query, qt_list, mse_quantizer, qjl_transform)
     q_norm_sq = (query * query).sum()
     return norms_sq - 2.0 * ip + q_norm_sq

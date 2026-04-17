@@ -16,35 +16,32 @@ def pack_indices(indices: torch.Tensor, bits: int) -> torch.Tensor:
         bits: Number of bits per index (1-8).
 
     Returns:
-        Packed uint8 tensor. Shape (*, ceil(d * bits / 8)).
+        Packed uint8 tensor. Shape (ceil(n * bits / 8),) for n = indices.numel().
     """
     if bits < 1 or bits > 8:
         raise ValueError(f"bits must be in [1, 8], got {bits}")
     if bits == 8:
-        return indices.to(torch.uint8)
+        return indices.reshape(-1).to(torch.uint8)
 
-    flat = indices.reshape(-1).to(torch.int32)
+    flat = indices.reshape(-1).to(torch.int64)
+    device = flat.device
     n = flat.numel()
-    total_bits = n * bits
+    if n == 0:
+        return torch.zeros(0, dtype=torch.uint8, device=device)
+
+    k_arange = torch.arange(bits, device=device, dtype=torch.int64)
+    bit_vals = ((flat.unsqueeze(-1) >> k_arange) & 1).to(torch.uint8)
+    bits_stream = bit_vals.reshape(-1)
+    total_bits = bits_stream.numel()
     n_bytes = (total_bits + 7) // 8
-
-    packed = torch.zeros(n_bytes, dtype=torch.uint8, device=indices.device)
-
-    bit_offset = 0
-    for i in range(n):
-        byte_idx = bit_offset // 8
-        bit_pos = bit_offset % 8
-        val = flat[i].item()
-
-        # May span two bytes
-        packed[byte_idx] |= (val << bit_pos) & 0xFF
-        overflow = bit_pos + bits - 8
-        if overflow > 0 and byte_idx + 1 < n_bytes:
-            packed[byte_idx + 1] |= (val >> (bits - overflow)) & 0xFF
-
-        bit_offset += bits
-
-    return packed
+    pad_len = n_bytes * 8 - total_bits
+    if pad_len:
+        bits_stream = torch.cat(
+            [bits_stream, torch.zeros(pad_len, dtype=torch.uint8, device=device)]
+        )
+    reshaped = bits_stream.view(n_bytes, 8)
+    shifts = torch.arange(8, device=device, dtype=torch.int32)
+    return (reshaped.to(torch.int32) << shifts).sum(dim=1).to(torch.uint8)
 
 
 def unpack_indices(packed: torch.Tensor, bits: int, count: int) -> torch.Tensor:
@@ -61,35 +58,30 @@ def unpack_indices(packed: torch.Tensor, bits: int, count: int) -> torch.Tensor:
     if bits < 1 or bits > 8:
         raise ValueError(f"bits must be in [1, 8], got {bits}")
     if bits == 8:
-        return packed[:count].to(torch.int32)
+        return packed[:count].reshape(-1).to(torch.int32)
 
-    mask = (1 << bits) - 1
-    result = torch.zeros(count, dtype=torch.int32, device=packed.device)
+    device = packed.device
+    if count == 0:
+        return torch.zeros(0, dtype=torch.int32, device=device)
 
-    bit_offset = 0
-    for i in range(count):
-        byte_idx = bit_offset // 8
-        bit_pos = bit_offset % 8
-        val = (packed[byte_idx].item() >> bit_pos) & mask
-
-        overflow = bit_pos + bits - 8
-        if overflow > 0 and byte_idx + 1 < len(packed):
-            val |= (packed[byte_idx + 1].item() << (8 - bit_pos)) & mask
-
-        result[i] = val
-        bit_offset += bits
-
-    return result
+    total_bits = count * bits
+    shifts_u8 = torch.arange(8, device=device, dtype=torch.uint8)
+    bits_from_bytes = ((packed.unsqueeze(-1) >> shifts_u8) & 1).reshape(-1)
+    stream = bits_from_bytes[:total_bits].to(torch.int64)
+    mat = stream.view(count, bits)
+    powers = 1 << torch.arange(bits, device=device, dtype=torch.int64)
+    return (mat * powers).sum(dim=-1).to(torch.int32)
 
 
 def pack_bits(signs: torch.Tensor) -> torch.Tensor:
     """Pack a boolean/int8 sign tensor into uint8 bitfield.
 
     Args:
-        signs: Tensor of 0/1 or -1/+1 values. Shape (*, d).
+        signs: Tensor of 0/1 or -1/+1 values. Any shape; values are packed in
+        flattened (row-major) order into a single 1D uint8 tensor.
 
     Returns:
-        Packed uint8 tensor. Shape (*, ceil(d / 8)).
+        Packed uint8 tensor. Shape (ceil(signs.numel() / 8),).
     """
     flat = (signs.reshape(-1) > 0).to(torch.uint8)
     n = flat.numel()
@@ -98,9 +90,24 @@ def pack_bits(signs: torch.Tensor) -> torch.Tensor:
     padded[:n] = flat
 
     reshaped = padded.reshape(n_bytes, 8)
-    shifts = torch.arange(8, device=signs.device, dtype=torch.uint8)
-    packed = (reshaped << shifts).sum(dim=1).to(torch.uint8)
-    return packed
+    shifts = torch.arange(8, device=signs.device, dtype=torch.int32)
+    return (reshaped.to(torch.int32) << shifts).sum(dim=1).to(torch.uint8)
+
+
+def pack_bits_batch(signs: torch.Tensor) -> torch.Tensor:
+    """Vectorized sign packing for a batch of shape (n, d)."""
+    if signs.ndim < 2:
+        raise ValueError("pack_bits_batch expects signs of shape (n, d)")
+    n, m = signs.shape
+    device = signs.device
+    flat = (signs > 0).to(torch.uint8)
+    n_bytes = (m + 7) // 8
+    padded_cols = n_bytes * 8
+    padded = torch.zeros(n, padded_cols, dtype=torch.uint8, device=device)
+    padded[:, :m] = flat
+    reshaped = padded.view(n, n_bytes, 8)
+    shifts = torch.arange(8, device=device, dtype=torch.int32)
+    return (reshaped.to(torch.int32) << shifts).sum(dim=-1).to(torch.uint8)
 
 
 def unpack_bits(packed: torch.Tensor, count: int) -> torch.Tensor:
@@ -116,3 +123,12 @@ def unpack_bits(packed: torch.Tensor, count: int) -> torch.Tensor:
     shifts = torch.arange(8, device=packed.device, dtype=torch.uint8)
     unpacked = ((packed.unsqueeze(-1) >> shifts) & 1).reshape(-1)[:count]
     return unpacked.to(torch.float32) * 2.0 - 1.0
+
+
+def unpack_bits_batch(packed: torch.Tensor, count: int) -> torch.Tensor:
+    """Unpack batch packed rows (n, n_bytes) to signs (n, count), values in {-1, +1}."""
+    n = packed.shape[0]
+    device = packed.device
+    shifts = torch.arange(8, device=device, dtype=torch.uint8)
+    bits = ((packed.unsqueeze(-1) >> shifts) & 1).reshape(n, -1)[:, :count]
+    return bits.to(torch.float32) * 2.0 - 1.0
