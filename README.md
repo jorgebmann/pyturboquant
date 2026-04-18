@@ -26,6 +26,7 @@ Per-vector storage cost (bytes) for the inner-product quantizer at `bits=b` is `
 Scope notes:
 
 - pyturboquant compresses the **embedding vector store**, not the embedding model itself. VRAM needed to run the embedding model is unchanged; use model-level quantization (AWQ, bitsandbytes, GGUF) for that.
+- **Storage and search both fit the same budget.** Peak fp32 memory during `search()` is bounded by `search_batch_size * dim * 4` bytes (default window: 65,536 vectors) -- not by the total number of indexed vectors -- so the ~4 GB storage number for a 10 M chunk BGE-base corpus is a realistic working-set number for query time, not just at-rest storage. Tune `search_batch_size` lower for tight memory budgets or higher for slightly better throughput; `benchmarks/bench_search_memory.py` reproduces the numbers.
 - Search compute is currently O(n) per query (dense asymmetric matmul). Sub-linear search via IVF partitioning is on the roadmap (v0.5.0).
 - For small corpora (< 100 k chunks) the document payload typically dominates; pyturboquant's savings become material at 1 M chunks and transformative at 10 M+.
 
@@ -35,6 +36,7 @@ Scope notes:
 - **Inner Product Quantizer** (Algorithm 2) -- two-stage MSE + 1-bit QJL residual for unbiased inner product estimation
 - **Zero-indexing-time ANN search** -- `TurboQuantIndex` with FAISS-like `.add()` / `.search()` API, asymmetric distance computation, save/load persistence; no training step, no data passes
 - **Truly online** -- stream new documents in at any time without rebuilding or reindexing
+- **Bounded search-time memory** -- configurable `search_batch_size` caps peak fp32 reconstruction at `search_batch_size * dim * 4` bytes regardless of how many vectors are indexed; a 10 M vector index does not require tens of GB of scratch RAM during queries
 - **LangChain VectorStore** -- drop-in `TurboQuantVectorStore` for low-RAM RAG pipelines
 - **Pure PyTorch** -- no custom C++ extensions; runs on CPU and CUDA out of the box
 - **Deterministic** -- seed-based rotation matrices and QJL projections for full reproducibility
@@ -219,7 +221,7 @@ cd pyturboquant
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-# Run tests (133 tests)
+# Run tests (162 tests)
 pytest
 
 # Lint
@@ -231,6 +233,7 @@ python scripts/precompute_codebooks.py
 # Run benchmarks
 python benchmarks/bench_distortion.py
 python benchmarks/bench_nn_search.py
+python benchmarks/bench_search_memory.py   # validates search-time memory bound
 ```
 
 ## Roadmap

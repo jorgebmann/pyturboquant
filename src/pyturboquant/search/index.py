@@ -27,6 +27,13 @@ class TurboQuantIndex:
         metric: Distance metric, one of "ip" (inner product) or "l2".
         seed: Deterministic seed for quantization.
         device: Torch device.
+        search_batch_size: Maximum number of database vectors whose fp32
+            reconstruction is materialized at once during ``search``. Peak
+            transient memory during search is bounded by
+            ``search_batch_size * dim * 4`` bytes regardless of index size,
+            so a consolidated 10 M vector index no longer needs tens of GB
+            of scratch RAM. Tune lower for tight memory budgets, higher for
+            maximum throughput.
     """
 
     def __init__(
@@ -36,14 +43,20 @@ class TurboQuantIndex:
         metric: str = "ip",
         seed: int = 0,
         device: str | torch.device = "cpu",
+        search_batch_size: int = 65_536,
     ) -> None:
         if metric not in ("ip", "l2"):
             raise ValueError(f"metric must be 'ip' or 'l2', got {metric!r}")
+        if search_batch_size < 1:
+            raise ValueError(
+                f"search_batch_size must be >= 1, got {search_batch_size}"
+            )
         self.dim = dim
         self.bits = bits
         self.metric = metric
         self.seed = seed
         self.device = torch.device(device) if isinstance(device, str) else device
+        self.search_batch_size = search_batch_size
         self._quantizer = InnerProductQuantizer(
             dim=dim, bits=bits, seed=seed, device=self.device
         )
@@ -106,7 +119,10 @@ class TurboQuantIndex:
         """Merge all index chunks from repeated ``add`` into a single chunk.
 
         Reduces Python-loop overhead during ``search`` when many small batches
-        were added. No-op if there is at most one chunk.
+        were added. Peak transient memory during ``search`` is bounded by
+        ``search_batch_size`` regardless of whether this method is called, so
+        consolidating a very large index is safe. No-op if there is at most
+        one chunk.
         """
         if len(self._qt_data) <= 1:
             return
@@ -180,27 +196,58 @@ class TurboQuantIndex:
         return topk_vals, topk_idx
 
     def _compute_scores_batch(self, queries: torch.Tensor) -> torch.Tensor:
-        """Scores for each query vs all DB vectors. Shape (nq, n_total)."""
-        nq = queries.shape[0]
+        """Scores for each query vs all DB vectors. Shape (nq, n_total).
+
+        Sub-iterates each stored chunk in ``search_batch_size``-sized windows
+        so peak fp32 reconstruction memory is ``search_batch_size * dim * 4``
+        bytes, independent of total index size.
+        """
         q_norm_sq = (queries * queries).sum(dim=-1, keepdim=True)  # (nq, 1)
         cols: list[torch.Tensor] = []
         for i, qt in enumerate(self._qt_data):
-            x_hat = self._quantizer.dequantize(qt)
-            flat_x_hat = x_hat.reshape(-1, self.dim)
-
-            mse_ip = flat_x_hat @ queries.T  # (chunk, nq)
-            qjl_ip = self._quantizer.qjl_transform.estimate_inner_product_batch_queries(
-                qt.qjl_bits.reshape(-1, qt.qjl_bits.shape[-1]),
-                queries,
-                qt.residual_norms.reshape(-1),
-            )
-            chunk_ip = mse_ip.T + qjl_ip  # (nq, chunk)
+            chunk_ip = self._score_chunk(qt, queries)  # (nq, n_chunk)
             if self.metric == "ip":
                 cols.append(chunk_ip)
             else:
-                ns = self._norms_sq[i].unsqueeze(0)
+                ns = self._norms_sq[i].reshape(1, -1)
                 cols.append(ns - 2.0 * chunk_ip + q_norm_sq)
         return torch.cat(cols, dim=-1)
+
+    def _score_chunk(
+        self, qt: QuantizedIP, queries: torch.Tensor
+    ) -> torch.Tensor:
+        """Inner-product scores between ``queries`` and a single chunk.
+
+        Walks the chunk in sub-batches of up to ``search_batch_size`` vectors,
+        reconstructing and discarding the fp32 window for each sub-batch so
+        that peak transient memory does not scale with chunk size.
+
+        Returns:
+            Tensor of shape ``(nq, n_chunk)``.
+        """
+        nq = queries.shape[0]
+        n_chunk = qt.residual_norms.reshape(-1).shape[0]
+        batch = max(1, self.search_batch_size)
+        qjl_flat = qt.qjl_bits.reshape(n_chunk, -1)
+        res_norms = qt.residual_norms.reshape(-1)
+
+        out = torch.empty(
+            nq, n_chunk, dtype=queries.dtype, device=queries.device
+        )
+        for start in range(0, n_chunk, batch):
+            end = min(start + batch, n_chunk)
+            x_hat_sub = self._quantizer.dequantize_range(qt, start, end)
+            mse_ip_sub = x_hat_sub @ queries.T  # (m, nq)
+            qjl_ip_sub = (
+                self._quantizer.qjl_transform
+                .estimate_inner_product_batch_queries(
+                    qjl_flat[start:end],
+                    queries,
+                    res_norms[start:end],
+                )
+            )  # (nq, m)
+            out[:, start:end] = mse_ip_sub.T + qjl_ip_sub
+        return out
 
     def save(self, path: str | Path) -> None:
         """Save index state to disk.

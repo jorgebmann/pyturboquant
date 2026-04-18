@@ -141,3 +141,52 @@ class MSEQuantizer:
 
         norms_flat = qt.norms.reshape(n_vectors, 1)
         return (rotated_back * norms_flat).reshape(*qt.norms.shape[:-1], self.dim)
+
+    def dequantize_range(
+        self, qt: QuantizedMSE, start: int, end: int
+    ) -> torch.Tensor:
+        """Reconstruct vectors in the index range ``[start, end)`` without materializing the full chunk.
+
+        When ``dim * qt.bits`` is a multiple of 8, each vector occupies an integer
+        number of bytes in ``qt.packed_indices``, enabling cheap byte-aligned
+        slicing of the packed buffer so peak fp32 memory during reconstruction
+        is bounded by ``(end - start) * dim * 4`` bytes. When the product is
+        not a multiple of 8 (e.g. an awkward ``dim`` that isn't divisible by 8
+        for the given bit-width) this falls back to a full ``dequantize`` plus
+        slice so correctness is preserved.
+
+        Args:
+            qt: Quantized representation from quantize().
+            start: Inclusive start vector index.
+            end: Exclusive end vector index.
+
+        Returns:
+            Reconstructed tensor of shape ``(end - start, dim)``.
+        """
+        n_total = qt.norms.reshape(-1).shape[0]
+        if not (0 <= start <= end <= n_total):
+            raise ValueError(
+                f"Invalid range [{start}, {end}) for chunk of size {n_total}"
+            )
+        m = end - start
+        if m == 0:
+            return torch.empty(0, self.dim, device=self.device, dtype=torch.float32)
+
+        bits = qt.bits
+        total_bits_per_vec = self.dim * bits
+
+        if total_bits_per_vec % 8 != 0:
+            full = self.dequantize(qt).reshape(-1, self.dim)
+            return full[start:end]
+
+        bytes_per_vec = total_bits_per_vec // 8
+        packed_sub = qt.packed_indices[
+            start * bytes_per_vec : end * bytes_per_vec
+        ]
+        indices = unpack_indices(packed_sub, bits, m * self.dim)
+        centroids = self._codebook.centroids
+        reconstructed = centroids[indices.long()].reshape(m, self.dim)
+
+        rotated_back = self._rotation.inverse(reconstructed)
+        norms_slice = qt.norms.reshape(-1)[start:end].unsqueeze(-1)
+        return rotated_back * norms_slice
