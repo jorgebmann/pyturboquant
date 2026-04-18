@@ -4,7 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pyturboquant"
-version = "0.0.3"
+dynamic = ["version"]
+[tool.setuptools.dynamic]
+version = { attr = "pyturboquant._version.__version__" }
 authors = [
     { name = "Jörg Bahlmann", email = "jorg.bahlmann@gmail.com" },
 ]

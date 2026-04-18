@@ -172,3 +172,96 @@ class TestTurboQuantIndex:
         db, _ = self._make_data()
         idx.add(db)
         assert idx.last_add_time_ms > 0
+
+    def test_search_batch_size_invalid_raises(self) -> None:
+        with pytest.raises(ValueError, match="search_batch_size"):
+            TurboQuantIndex(dim=64, bits=3, search_batch_size=0)
+
+    def test_search_chunked_matches_unchunked(self) -> None:
+        """Sub-batched search on a consolidated index must match full-chunk search."""
+        d = 64
+        db, queries = self._make_data(n=200, d=d)
+
+        idx_small = TurboQuantIndex(
+            dim=d, bits=4, metric="ip", seed=0, search_batch_size=16
+        )
+        idx_large = TurboQuantIndex(
+            dim=d, bits=4, metric="ip", seed=0, search_batch_size=10_000
+        )
+        idx_small.add(db)
+        idx_large.add(db)
+        idx_small.consolidate()
+        idx_large.consolidate()
+
+        d_small, i_small = idx_small.search(queries, k=10)
+        d_large, i_large = idx_large.search(queries, k=10)
+        torch.testing.assert_close(i_small, i_large)
+        torch.testing.assert_close(d_small, d_large, atol=1e-5, rtol=1e-5)
+
+    def test_search_batch_size_one(self) -> None:
+        """search_batch_size=1 (degenerate case) still produces valid results."""
+        d = 64
+        db, queries = self._make_data(n=30, d=d)
+        idx = TurboQuantIndex(
+            dim=d, bits=3, metric="ip", seed=0, search_batch_size=1
+        )
+        idx.add(db)
+        idx.consolidate()
+        dists, ids = idx.search(queries, k=5)
+        assert ids.shape == (5, 5)
+        assert dists.shape == (5, 5)
+
+        idx_ref = TurboQuantIndex(
+            dim=d, bits=3, metric="ip", seed=0, search_batch_size=1024
+        )
+        idx_ref.add(db)
+        idx_ref.consolidate()
+        d_ref, i_ref = idx_ref.search(queries, k=5)
+        torch.testing.assert_close(ids, i_ref)
+        torch.testing.assert_close(dists, d_ref, atol=1e-5, rtol=1e-5)
+
+    def test_search_unaligned_dim_falls_back(self) -> None:
+        """dim*mse_bits not divisible by 8 exercises the fallback path."""
+        # IP quantizer at bits=4 uses internal MSE bits=3.
+        # dim=100, internal_bits=3 -> 300 bits/vector, not byte-aligned.
+        d = 100
+        g = torch.Generator().manual_seed(0)
+        db = torch.randn(50, d, generator=g)
+        queries = torch.randn(4, d, generator=g)
+
+        idx = TurboQuantIndex(
+            dim=d, bits=4, metric="ip", seed=0, search_batch_size=8
+        )
+        idx.add(db)
+        idx.consolidate()
+        d_small, i_small = idx.search(queries, k=5)
+
+        idx_large = TurboQuantIndex(
+            dim=d, bits=4, metric="ip", seed=0, search_batch_size=10_000
+        )
+        idx_large.add(db)
+        idx_large.consolidate()
+        d_large, i_large = idx_large.search(queries, k=5)
+
+        torch.testing.assert_close(i_small, i_large)
+        torch.testing.assert_close(d_small, d_large, atol=1e-5, rtol=1e-5)
+
+    def test_search_chunked_matches_l2(self) -> None:
+        """Sub-batched L2 search must match full-chunk L2 search."""
+        d = 64
+        db, queries = self._make_data(n=150, d=d)
+        idx_small = TurboQuantIndex(
+            dim=d, bits=3, metric="l2", seed=0, search_batch_size=8
+        )
+        idx_large = TurboQuantIndex(
+            dim=d, bits=3, metric="l2", seed=0, search_batch_size=10_000
+        )
+        idx_small.add(db)
+        idx_large.add(db)
+        idx_small.consolidate()
+        idx_large.consolidate()
+
+        d1, i1 = idx_small.search(queries, k=10)
+        d2, i2 = idx_large.search(queries, k=10)
+        torch.testing.assert_close(i1, i2)
+        torch.testing.assert_close(d1, d2, atol=1e-4, rtol=1e-4)

@@ -103,6 +103,25 @@ class InnerProductQuantizer:
         """
         return self._mse.dequantize(qt.mse_data)
 
+    def dequantize_range(
+        self, qt: QuantizedIP, start: int, end: int
+    ) -> torch.Tensor:
+        """Reconstruct vectors in the index range ``[start, end)`` from a chunk.
+
+        Thin wrapper around :meth:`MSEQuantizer.dequantize_range` -- only the
+        MSE component is reconstructed. Used by ``TurboQuantIndex`` to bound
+        peak fp32 memory during search independently of chunk size.
+
+        Args:
+            qt: Quantized representation from quantize().
+            start: Inclusive start vector index.
+            end: Exclusive end vector index.
+
+        Returns:
+            Reconstructed tensor of shape ``(end - start, dim)``.
+        """
+        return self._mse.dequantize_range(qt.mse_data, start, end)
+
     def estimate_inner_product(self, qt: QuantizedIP, y: torch.Tensor) -> torch.Tensor:
         """Estimate <x, y> from the quantized representation.
 
