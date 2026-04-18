@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Precompute Lloyd-Max codebooks for standard Gaussian N(0,1) at bit-widths 1-8.
 
-Saves results as .pt files under data/codebooks/. Requires scipy.
+Saves results as .pt files under src/pyturboquant/data/codebooks/. Requires scipy.
 
 Usage:
     python scripts/precompute_codebooks.py
@@ -17,7 +17,13 @@ from pyturboquant.core.codebook import _compute_gaussian_codebook
 
 
 def main() -> None:
-    out_dir = Path(__file__).resolve().parent.parent / "data" / "codebooks"
+    out_dir = (
+        Path(__file__).resolve().parent.parent
+        / "src"
+        / "pyturboquant"
+        / "data"
+        / "codebooks"
+    )
     out_dir.mkdir(parents=True, exist_ok=True)
 
     for bits in range(1, 9):

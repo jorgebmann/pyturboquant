@@ -5,8 +5,6 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pyturboquant"
 dynamic = ["version"]
-[tool.setuptools.dynamic]
-version = { attr = "pyturboquant._version.__version__" }
 authors = [
     { name = "Jörg Bahlmann", email = "jorg.bahlmann@gmail.com" },
 ]
@@ -52,7 +50,10 @@ Issues = "https://github.com/jorgbahlmann/pyturboquant/issues"
 where = ["src"]
 
 [tool.setuptools.package-data]
-pyturboquant = ["../data/codebooks/*.pt"]
+pyturboquant = ["data/codebooks/*.pt"]
+
+[tool.setuptools.dynamic]
+version = { attr = "pyturboquant._version.__version__" }
 
 [tool.ruff]
 target-version = "py312"

@@ -3,7 +3,7 @@
 The codebooks are precomputed for a standard Gaussian N(0,1) and scaled
 by 1/sqrt(d) at load time to match the sphere coordinate distribution.
 
-Shipped ``data/codebooks/*.pt`` files cover common bit-widths so runtime
+Shipped ``pyturboquant/data/codebooks/*.pt`` files cover common bit-widths so runtime
 never needs SciPy. SciPy is only used when those files are missing and
 ``bits > 4`` (iterative Lloyd--Max) or when computing ``mse_cost`` without
 cached values.
@@ -23,7 +23,7 @@ _CODEBOOK_CACHE: dict[int, Codebook] = {}
 _SCALED_CODEBOOK_CACHE: OrderedDict[tuple[int, int, str], Codebook] = OrderedDict()
 _MAX_SCALED_CODEBOOK_CACHE = 256
 
-_DATA_DIR = Path(__file__).resolve().parent.parent.parent.parent / "data" / "codebooks"
+_DATA_DIR = Path(__file__).resolve().parent.parent / "data" / "codebooks"
 
 
 def _compute_gaussian_codebook(bits: int) -> Codebook:
