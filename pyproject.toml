@@ -5,10 +5,8 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pyturboquant"
 dynamic = ["version"]
-[tool.setuptools.dynamic]
-version = { attr = "pyturboquant._version.__version__" }
 authors = [
-    { name = "Jörg Bahlmann", email = "jorg.bahlmann@gmail.com" },
+    { name = "Jörg Bahlmann", email = "jbahlmann.dev@gmail.com" },
 ]
 description = "High-performance implementation of Google's TurboQuant: online vector quantization with near-optimal distortion rates"
 readme = "README.md"
@@ -39,14 +37,23 @@ dev = [
     "pre-commit",
     "scipy>=1.14",
 ]
+bench = [
+    "beir>=2.0",
+    "sentence-transformers>=2.7",
+    "pytrec-eval>=0.5",
+]
 all = [
     "pyturboquant[langchain]",
     "pyturboquant[dev]",
+    "pyturboquant[bench]",
 ]
 
 [project.urls]
 Homepage = "https://github.com/jorgbahlmann/pyturboquant"
 Issues = "https://github.com/jorgbahlmann/pyturboquant/issues"
+
+[tool.setuptools.dynamic]
+version = { attr = "pyturboquant._version.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["src"]

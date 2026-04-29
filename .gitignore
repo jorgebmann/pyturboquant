@@ -212,3 +212,9 @@ config.yaml
 
 # JetBrains
 .idea/
+
+# Benchmark output files (bench_beir.py raw output and JSON dumps)
+.benchmark_results_*.txt
+benchmarks/results/*.json
+beir_*.json
+*_beir.json
