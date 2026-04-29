@@ -213,6 +213,25 @@ Measured on 5,000 random unit vectors at d=256:
 
 These match the paper's Theorem 1 values within 1%.
 
+## Retrieval Quality on BEIR
+
+Measured with `BAAI/bge-base-en-v1.5` (d=768) on five [BEIR](https://github.com/beir-cellar/beir) datasets using `benchmarks/bench_beir.py`. The fp32 baseline is an exact chunked matmul over L2-normalised embeddings; pyturboquant uses `metric="ip"` (cosine similarity on unit vectors). Self-Recall@k is the overlap between the compressed top-k and the exact fp32 top-k -- it isolates quantiser error from embedding-model error.
+
+| Dataset | n corpus | fp32 nDCG@10 | b=4 nDCG@10 | Δ b=4 | b=3 nDCG@10 | Δ b=3 | Compression (b=4) |
+|---|---|---|---|---|---|---|---|
+| SciFact | 5 183 | 0.7392 | 0.7281 | −1.5% | 0.7291 | −1.4% | 7.8× |
+| NFCorpus | 3 633 | 0.3694 | 0.3677 | −0.5% | 0.3556 | −3.7% | 7.8× |
+| FiQA-2018 | 57 638 | 0.3904 | 0.3816 | −2.3% | 0.3629 | −7.0% | 7.8× |
+| SciDocs | 25 657 | 0.2207 | 0.2152 | −2.5% | 0.2057 | −6.8% | 7.8× |
+| ArguAna | 8 674 | 0.6021 | 0.5801 | −3.7% | 0.5715 | −5.1% | 7.8× |
+| **Average** | | **0.4644** | **0.4546** | **−2.1%** | **0.4449** | **−4.8%** | **7.8×** |
+
+Memory at b=4 per dataset ranges from 1.36 MB (NFCorpus) to 21.55 MB (FiQA); the fp32 baseline ranges from 10.64 MB to 168.86 MB, a consistent **~7.8× reduction**.
+
+Self-recall at b=4 averages 0.83 at k=10 and 0.86 at k=100 -- meaning about 1 in 6 top-10 results is swapped -- yet the downstream nDCG@10 loss is only 2.1%. The gap between self-recall and quality retention demonstrates that swapped results are nearly always equally relevant, which is the expected behaviour for a near-optimal unbiased inner-product estimator.
+
+b=2 is available for extreme memory budgets but degrades more sharply (avg −11.4% nDCG@10, range 5.7–15.5% across datasets); prefer b≥3 for production deployments.
+
 ## Development
 
 ```bash
@@ -235,6 +254,29 @@ python benchmarks/bench_distortion.py
 python benchmarks/bench_nn_search.py
 python benchmarks/bench_search_memory.py   # validates search-time memory bound
 ```
+
+### Evaluate retrieval quality on BEIR
+
+`benchmarks/bench_beir.py` quantifies how much retrieval quality is lost to compression on real IR benchmarks. For each bit setting it reports nDCG@10, Recall@100 and MAP@10 against BEIR's relevance judgments, plus self-recall (the overlap between the TurboQuant top-k and the fp32 top-k for the same embedding model), index memory, indexing time, and search latency.
+
+```bash
+# Install the bench extra (adds beir, sentence-transformers, pytrec-eval).
+pip install -e ".[bench]"
+
+# Small suite (SciFact, NFCorpus, FiQA, SciDocs, ArguAna) with BGE-base
+# at bits 2/3/4 -- about 10-20 minutes end-to-end on a single GPU.
+python benchmarks/bench_beir.py
+
+# Fast single-dataset iteration with the lighter MiniLM encoder.
+python benchmarks/bench_beir.py --datasets scifact --model minilm
+
+# MSMARCO (8.84M passages, split=dev) at full scale. First run is encoding
+# bound; subsequent runs hit the on-disk embedding cache under
+# data/beir_cache/. Subsample via --max-corpus-size for quick checks.
+python benchmarks/bench_beir.py --datasets msmarco --output-json msmarco.json
+```
+
+Available dataset keys: `scifact`, `nfcorpus`, `fiqa`, `scidocs`, `arguana`, `msmarco`, plus `small` (small suite) and `all` (small + msmarco). Embedding caches are keyed by `(model, dataset)` so sweeping `--bits` re-uses them automatically.
 
 ## Roadmap
 
